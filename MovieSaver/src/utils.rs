@@ -1,12 +1,13 @@
-use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Write};
+use std::fs::{self};
+use std::io::{self, Write};
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
-use chrono::Local;
+use chrono::{FixedOffset, Utc};
+use serde::{Deserialize, Serialize};
 
 /// Struct representing movie information.
 /// Each movie has a timestamp, title, release year, and price.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)] // This allows the struct to obtain proprties of Debug and Clone and also to be serialized and deserialized.
+                                                // I.e we can print it, clone it, and convert it to/from formats like JSON if needed. 
 pub struct MovieInfo {
     pub timestamp: String,
     pub title: String,
@@ -14,11 +15,16 @@ pub struct MovieInfo {
     pub price: f64,
 }
 
-/// Returns the current timestamp as a formatted string.
-/// Uses the local time in "YYYY-MM-DD HH:MM:SS" format.
+/// Returns the current timestamp as a formatted string in Central Africa Time (UTC+2).
+/// Uses the format "YYYY-MM-DD HH:MM:SS".
 pub fn get_current_timestamp() -> String {
-    Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
-}
+    // CAT is UTC+2
+    let cat_offset = FixedOffset::east_opt(2 * 3600).unwrap(); // 2 hours * 3600 seconds
+    let utc_now = Utc::now();
+    let cat_time = utc_now.with_timezone(&cat_offset);
+    
+    cat_time.format("%Y-%m-%d %H:%M:%S").to_string()
+} //TODO: Consider expanding the supported timezones in the future.
 
 /// Ensures the "MovieData" directory exists for storing movie files.
 /// If the directory does not exist, it will be created.
@@ -68,58 +74,57 @@ pub fn input_movie() -> MovieInfo {
 }
 
 /// Saves the list of movies to a file in the "MovieData" directory.
-/// Each movie is written as a line with fields separated by '|'.
+/// Movies are saved in JSON format for better data integrity and readability.
 /// Prints an error message if the file cannot be created or written.
 pub fn save_movies(movies: &[MovieInfo], filename: &str) {
     ensure_movie_directory_exists();
     let path = Path::new(filename);
-    let mut file = match File::create(path) {
-        Ok(f) => f,
+    
+    // Convert movies to pretty-printed JSON
+    let json_data = match serde_json::to_string_pretty(movies) {
+        Ok(data) => data,
         Err(e) => {
-            eprintln!("Failed to save movies to {}: {}", filename, e);
+            eprintln!("Failed to convert movies to JSON: {}", e);
             return;
         }
     };
-
-    for movie in movies {
-        if let Err(e) = writeln!(
-            file,
-            "{}|{}|{}|{}",
-            movie.timestamp, movie.title, movie.year, movie.price
-        ) {
-            eprintln!("Failed to write movie: {}", e);
-        }
+    
+    // Write JSON data to file
+    if let Err(e) = fs::write(path, json_data) {
+        eprintln!("Failed to save movies to {}: {}", filename, e);
+    } else {
+        println!("Movies saved successfully to {}", filename);
     }
 }
 
 /// Loads movies from a file in the "MovieData" directory.
-/// Each line is parsed into a MovieInfo struct.
+/// Reads JSON formatted data and parses it into MovieInfo structs.
 /// Returns a vector of loaded movies. If the file does not exist, returns an empty vector.
 pub fn load_movies(filename: &str) -> Vec<MovieInfo> {
     let path = Path::new(filename);
-    let file = match File::open(path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
+    
+    // Check if file exists first
+    if !path.exists() {
+        return Vec::new();
+    }
+    
+    // Read the file content
+    let data = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) => {
+            eprintln!("Warning: Could not read file {}: {}", filename, e);
+            return Vec::new();
+        }
     };
-    let reader = BufReader::new(file);
-    let mut movies = Vec::new();
-
-    for line in reader.lines() {
-        if let Ok(line) = line {
-            let parts: Vec<&str> = line.split('|').collect();
-            if parts.len() == 4 {
-                let year = parts[2].parse().unwrap_or(0);
-                let price = parts[3].parse().unwrap_or(0.0);
-                movies.push(MovieInfo {
-                    timestamp: parts[0].to_string(),
-                    title: parts[1].to_string(),
-                    year,
-                    price,
-                });
-            }
+    
+    // Parse JSON data into MovieInfo objects
+    match serde_json::from_str(&data) {
+        Ok(movies) => movies,
+        Err(e) => {
+            eprintln!("Warning: Failed to parse JSON data from {}: {}", filename, e);
+            Vec::new()
         }
     }
-    movies
 }
 
 /// Displays all movies in the provided list.
@@ -152,7 +157,7 @@ pub fn delete_movie(movies: &mut Vec<MovieInfo>) {
 
     let mut input = String::new();
     io::stdin().read_line(&mut input).expect("Failed to read input");
-    let idx: usize = match input.trim().parse() {
+    let idx: usize = match input.trim().parse::<usize>() {
         Ok(num) if num > 0 && num <= movies.len() => num - 1,
         _ => {
             println!("Invalid selection.");
@@ -167,7 +172,7 @@ pub fn delete_movie(movies: &mut Vec<MovieInfo>) {
 /// Handles the user interface loop for adding, viewing, and saving movies.
 /// Returns Ok(0) on normal exit, or Err(String) on error.
 pub fn run_movie_db() -> Result<i32, String> {
-    let filename = "MovieData/movies.txt";
+    let filename = "MovieData/movies.json"; // Changed from .txt to .json
     let mut movies = load_movies(filename);
 
     loop {
